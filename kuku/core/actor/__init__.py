@@ -3,7 +3,7 @@ from .actor import *
 from .ref import *
 
 __all__ = [
-    *mailbox,
-    *actor,
-    *ref
+    *mailbox.__all__,
+    *actor.__all__,
+    *ref.__all__
 ]

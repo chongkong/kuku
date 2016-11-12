@@ -1,9 +1,9 @@
-from asyncio import wait_for, ensure_future, get_event_loop, Future
+from asyncio import wait_for, ensure_future, get_event_loop
 from enum import Enum
 from uuid import uuid4
 
 from kuku.core.actor.mailbox import Mailbox
-from kuku.core.actor.ref import SenderWrappedActorRef, ActorRef
+from kuku.core.actor.ref import ActorRef, RpcActorRef, patch_sender
 from kuku.core.message import Envelope, SystemMessage
 
 
@@ -11,7 +11,8 @@ __all__ = [
     'ActorLifeCycle',
     'behavior',
     'ActorMeta',
-    'AsyncActor'
+    'AsyncActor',
+    'base_actor'
 ]
 
 
@@ -24,25 +25,29 @@ class ActorLifeCycle(Enum):
 
 def behavior(msg_type):
     def decorator(f):
-        f.__msg_type = msg_type
+        f.msg_type = msg_type
         return f
     return decorator
 
 
 class ActorMeta(type):
+    @classmethod
+    def __prepare__(metacls, name, bases):
+        return {'behaviors': {}}
+
     def __new__(mcs, name, bases, attrs, **kwargs):
         actor = super().__new__(mcs, name, bases, attrs)
 
         class_behaviors = [
             attr for attr in attrs.values()
-            if hasattr(attr, '__msg_type')]
+            if hasattr(attr, 'msg_type')]
         base_behaviors = [
             attr for base in bases
             for attr in base.__dict__.values()
-            if hasattr(attr, '__msg_type')]
+            if hasattr(attr, 'msg_type')]
 
         for behav in class_behaviors + base_behaviors:
-            msg_type = getattr(behav, '__msg_type')
+            msg_type = getattr(behav, 'msg_type')
             if msg_type not in actor.behaviors:
                 actor.behaviors[msg_type] = behav
 
@@ -61,26 +66,30 @@ class AsyncActor(metaclass=ActorMeta):
         self._mailbox = Mailbox(loop=self._loop)
 
         self.context = None
+        self.on_start()
 
-        self.run(self._main())
+        self.fire(self._main())
+
+    def on_start(self):
+        pass
+
+    def actor_ref_factory(self):
+        return ActorRef(self._mailbox, self._loop)
 
     @property
     def ref(self):
-        return ActorRef(self._mailbox, self._loop)
+        return self.actor_ref_factory()
 
     @property
     def sender(self):
         if self.context and 'sender' in self.context:
             return self.context['sender']
 
-    def run(self, coroutine, timeout=None, callback=None):
-        if timeout is None:
-            fut = ensure_future(coroutine, loop=self._loop)
-        else:
-            fut = wait_for(coroutine, timeout=timeout, loop=self._loop)
-        if callback is not None:
-            fut.add_done_callback(callback)
-        return fut
+    def fire(self, coroutine):
+        return ensure_future(coroutine, loop=self._loop)
+
+    def until(self, coroutine, timeout=None):
+        return wait_for(coroutine, timeout, loop=self._loop)
 
     def _find_behavior(self, msg_type):
         for type_ in msg_type.mro():
@@ -95,7 +104,9 @@ class AsyncActor(metaclass=ActorMeta):
                 if not isinstance(envelope, Envelope):
                     print('Message should be wrapped in an Envelope')
                     continue
-                self.context = dict(sender=SenderWrappedActorRef(self.ref, envelope.sender_ref))
+                self.context = {
+                    'sender': patch_sender(
+                        envelope.sender_ref, self.ref, self.default_timeout)}
                 behav = self._find_behavior(type(envelope.message))
                 if behav is not None:
                     await behav(self, envelope.message)
@@ -107,10 +118,9 @@ class AsyncActor(metaclass=ActorMeta):
 
             except Exception as e:
                 print('Error occurred: {}'.format(e))
-                pass
 
     @behavior(object)
-    async def handle_message(self, message):
+    async def handle_default(self, message):
         print('UnRegistered message type: {}'.format(type(message)))
 
     @behavior(SystemMessage)
@@ -119,13 +129,22 @@ class AsyncActor(metaclass=ActorMeta):
             self.life_cycle = ActorLifeCycle.stopped
 
 
-class LoggingActor(AsyncActor):
+class RpcActor(AsyncActor):
+    def actor_ref_factory(self):
+        return RpcActorRef(self._mailbox, self._loop,
+                           self.behaviors, self.default_timeout)
+
+
+base_actor = RpcActor
+
+
+class LoggingActor(base_actor):
     @behavior(str)
     async def handle_message(self, message):
         print(message)
 
 
-class EchoActor(AsyncActor):
+class EchoActor(base_actor):
     @behavior(str)
     async def handle_message(self, message):
         self.sender.tell(message)
@@ -133,5 +152,8 @@ class EchoActor(AsyncActor):
 
 if __name__ == '__main__':
     log = LoggingActor().ref
+    log.tell('hello')
+    log.handle_message('world')
+
     echo = EchoActor().ref
     echo.tell('yollo', sender=log)
