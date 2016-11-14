@@ -20,17 +20,18 @@ class ActorRef(object):
         self._loop = loop
 
     def tell(self, message, sender=nobody):
-        envelope = Envelope(sender, message)
+        envelope = Envelope(message, sender=sender)
         self._mailbox.put(envelope)
 
     async def ask(self, message, timeout=None):
-        fut = wait_for(Future(loop=self._loop), timeout=timeout)
+        fut = Future(loop=self._loop)
 
         def fn(envelope):
             if not fut.done():
                 fut.set_result(envelope.message)
 
-        self._mailbox.put(Envelope(FunctionRef(fn), message))
+        self._mailbox.put(Envelope(message, sender=FunctionRef(fn)))
+        return await wait_for(fut, timeout)
 
 
 def patch_sender(actor_ref, default_sender, default_timeout):
@@ -45,8 +46,8 @@ def patch_sender(actor_ref, default_sender, default_timeout):
         original_tell(message, sender or default_sender)
 
     @wraps(original_ask)
-    def patched_ask(self, message, timeout=None):
-        original_ask(message, timeout or default_timeout)
+    async def patched_ask(self, message, timeout=None):
+        return await original_ask(message, timeout or default_timeout)
 
     actor_ref.tell = types.MethodType(patched_tell, actor_ref)
     actor_ref.ask = types.MethodType(patched_ask, actor_ref)
@@ -55,12 +56,12 @@ def patch_sender(actor_ref, default_sender, default_timeout):
 
 
 class RpcActorRef(ActorRef):
-    def __init__(self, mailbox, loop, behaviors, rpc_timeout):
+    def __init__(self, mailbox, loop, behaviors):
         super().__init__(mailbox, loop)
 
         for msg_type, behav in behaviors.items():
             def rpc(slf, *args, **kwargs):
-                timeout = kwargs.pop('timeout', rpc_timeout)
+                timeout = kwargs.pop('timeout', None)
                 msg = msg_type(*args, **kwargs)
                 return ensure_future(slf.ask(msg, timeout=timeout), loop=loop)
             setattr(self, behav.__name__, types.MethodType(rpc, self))
@@ -70,8 +71,8 @@ class FunctionRef(object):
     def __init__(self, fn):
         self.fn = fn
 
-    def tell(self, message):
-        self.fn(message)
+    def tell(self, message, sender=ActorRef.nobody):
+        self.fn(Envelope(message, sender))
 
     async def ask(self, message):
         raise NotImplementedError('Cannot ask to FunctionRef')

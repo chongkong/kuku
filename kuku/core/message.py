@@ -1,3 +1,5 @@
+from collections import namedtuple
+
 __all__ = [
     'SystemMessage',
     'Envelope'
@@ -15,7 +17,4 @@ class SystemMessage(object):
         return SystemMessage('kill')
 
 
-class Envelope(object):
-    def __init__(self, sender_ref, message):
-        self.sender_ref = sender_ref
-        self.message = message
+Envelope = namedtuple('Envelope', ['message', 'sender'])
