@@ -1,42 +1,48 @@
-from asyncio import Task, iscoroutine
-from collections import ChainMap
-from functools import partial
+from asyncio import Task, iscoroutine, get_event_loop
+from inspect import ismethod
 
-__all__ = ['StepAwareTask', 'ActorContext']
+__all__ = [
+    'StepAwareTask',
+    'ActorContext',
+    'get_current_context'
+]
 
 
 class StepAwareTask(Task):
-    def __init__(self, coro, *, loop=None,
-                 before_step=None, after_step=None):
+    def __init__(self, coro, before_step, after_step, *, loop=None):
         super().__init__(coro, loop=loop)
         self._before_step = before_step
         self._after_step = after_step
 
     def _step(self, *args, **kwargs):
-        if self._before_step:
-            self._before_step()
+        self._before_step()
         super()._step(*args, **kwargs)
-        if self._after_step:
-            self._after_step()
+        self._after_step()
 
 
 class ActorContext(object):
-    def __init__(self, loop):
-        assert loop is not None
-        self._loop = loop
-        self._extra_ctx = None
-        self._sender = None
+    def __init__(self, actor):
+        self._contexts = []
+        self._loop = actor.loop
+
+        self.parent = actor.parent
+        self.sender = None
+        self.me = actor.ref
+        self.default_timeout = actor.default_timeout
         self.children = []
 
-    @property
-    def sender(self):
-        return self._extra_ctx.get('sender', self._sender)
-
     def push(self, ctx):
-        self._extra_ctx = ctx
+        backup = {}
+        for key, val in ctx.items():
+            if hasattr(self, key) and not ismethod(getattr(self, key)):
+                backup[key] = getattr(self, key)
+                setattr(self, key, val)
+        self._contexts.append(backup)
 
     def pop(self):
-        self._extra_ctx = None
+        backup = self._contexts.pop()
+        for key, val in backup.items():
+            setattr(self, key, val)
 
     def run(self, coro):
         if not iscoroutine(coro):
@@ -50,9 +56,20 @@ class ActorContext(object):
             raise TypeError(
                 'argument of run_with_context() should be a coroutine; '
                 '{} found'.format(type(coro)))
-        return StepAwareTask(coro, loop=self._loop,
-                             before_step=partial(self.push, ctx),
-                             after_step=self.pop)
+
+        def before():
+            setattr(self._loop, 'actor_context', self)
+            self.push(ctx)
+
+        def after():
+            delattr(self._loop, 'actor_context')
+            self.pop()
+
+        return StepAwareTask(coro, before, after, loop=self._loop)
 
     def spawn(self, actor_type):
         pass
+
+
+def get_current_context():
+    return getattr(get_event_loop(), 'actor_context', None)

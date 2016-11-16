@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from kuku.core.actor.context import ActorContext
 from kuku.core.actor.mailbox import Mailbox
-from kuku.core.actor.ref import ActorRef, RpcActorRef, patch_sender
+from kuku.core.actor.ref import ActorRef, RpcActorRef
 from kuku.core.message import Envelope, SystemMessage
 
 
@@ -64,13 +64,13 @@ class AsyncActor(metaclass=ActorMeta):
         self.parent = parent
         self.uuid = uuid4()
         self.life_cycle = ActorLifeCycle.born
-        self._loop = loop or get_event_loop()
-        self._mailbox = Mailbox(self._loop)
-        self._context = ActorContext(self._loop)
+        self.loop = loop or get_event_loop()
+        self.mailbox = Mailbox(self.loop)
+        self.context = ActorContext(self)
 
         self.before_start()
 
-        self._context.run(self._main())
+        self.context.run(self._main())
 
     def before_start(self):
         pass
@@ -79,19 +79,18 @@ class AsyncActor(metaclass=ActorMeta):
         pass
 
     def actor_ref_factory(self):
-        return ActorRef(self._mailbox, self._loop)
+        return ActorRef(self.mailbox)
+
+    def context_factory(self, envelope):
+        return {'sender': envelope.sender}
 
     @property
     def ref(self):
         return self.actor_ref_factory()
 
     @property
-    def context(self):
-        return self._context
-
-    @property
     def sender(self):
-        return self._context.sender
+        return self.context.sender
 
     def _find_behavior(self, msg_type):
         for type_ in msg_type.mro():
@@ -99,20 +98,18 @@ class AsyncActor(metaclass=ActorMeta):
                 return self.behaviors[type_]
         raise TypeError('Unknown message type: {}'.format(msg_type))
 
-    def context_factory(self, envelope):
-        return {'sender': patch_sender(
-                    envelope.sender, self.ref, self.default_timeout)}
-
     async def _main(self):
         while True:
             try:
-                envelope = await self._mailbox.get()
+                envelope = await self.mailbox.get()
                 assert isinstance(envelope, Envelope)
                 await self._open_envelope(envelope)
                 if self.life_cycle == ActorLifeCycle.stopped:
                     break
             except Exception as e:
                 print('Error occurred: {}'.format(e))
+                # TODO: supervised by parent
+
         self.before_die()
         self.life_cycle = ActorLifeCycle.dead
 
@@ -120,12 +117,12 @@ class AsyncActor(metaclass=ActorMeta):
         ctx = self.context_factory(envelope)
         behav = self._find_behavior(type(envelope.message))
         if inspect.iscoroutinefunction(behav):
-            self._context.run_with_context(
+            self.context.run_with_context(
                 behav(self, envelope.message), ctx)
         else:
-            self._context.push(ctx)
+            self.context.push(ctx)
             behav(self, envelope.message)
-            self._context.pop()
+            self.context.pop()
 
     @behavior(object)
     def unhandled(self, message):
@@ -139,7 +136,7 @@ class AsyncActor(metaclass=ActorMeta):
 
 class RpcActor(AsyncActor):
     def actor_ref_factory(self):
-        return RpcActorRef(self._mailbox, self._loop, self.behaviors)
+        return RpcActorRef(self.mailbox, self.behaviors)
 
 
 base_actor = RpcActor
