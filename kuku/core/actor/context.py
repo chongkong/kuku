@@ -49,7 +49,14 @@ class ActorContext(object):
             raise TypeError(
                 'argument of run() should be a coroutine; '
                 '{} found'.format(type(coro)))
-        return Task(coro, loop=self._loop)
+
+        def before():
+            setattr(self._loop, 'actor_context', self)
+
+        def after():
+            delattr(self._loop, 'actor_context')
+
+        return StepAwareTask(coro, before, after, loop=self._loop)
 
     def run_with_context(self, coro, ctx):
         if not iscoroutine(coro):
