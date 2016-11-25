@@ -32,7 +32,7 @@ class ActorRef(object):
         envelope = Envelope(message, sender=sender)
         self._mailbox.put(envelope)
 
-    async def ask(self, message, timeout=None):
+    def ask(self, message, timeout=None):
         fut = Future(loop=get_event_loop())
 
         def fn(envelope):
@@ -40,7 +40,7 @@ class ActorRef(object):
                 fut.set_result(envelope.message)
 
         self._mailbox.put(Envelope(message, sender=FunctionRef(fn)))
-        return await wait_for(fut, timeout)
+        return wait_for(fut, timeout)
 
 
 class RpcActorRef(ActorRef):
@@ -55,10 +55,12 @@ class RpcActorRef(ActorRef):
         msg_type = self._msg_types[behav]
         return partial(self._rpc, msg_type)
 
-    def _rpc(self, msg_type, *args, **kwargs):
-        timeout = kwargs.pop('timeout', get_current_context_timeout())
+    def _rpc(self, msg_type, *args, sender=None, timeout=None, **kwargs):
         message = msg_type(*args, **kwargs)
-        return ensure_future(self.ask(message, timeout=timeout), loop=get_event_loop())
+        if sender:
+            self.tell(message, sender)
+        else:
+            return self.ask(message, timeout=timeout or get_current_context_timeout())
 
 
 class FunctionRef(object):
