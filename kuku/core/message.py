@@ -6,11 +6,9 @@ __all__ = [
 ]
 
 
-class SystemMessage(object):
-    def __init__(self, command, *args, **kwargs):
-        self.command = command
-        self.args = args
-        self.kwargs = kwargs
+class SystemMessage(namedtuple('SystemMessage', ['command', 'args', 'kwargs'])):
+    def __new__(cls, command, *args, **kwargs):
+        return super().__new__(cls, command, args, kwargs)
 
     @staticmethod
     def kill():
