@@ -60,7 +60,11 @@ class AsyncActor(metaclass=ActorMeta):
     default_timeout = 60
     behaviors = {}
 
-    def __init__(self, parent=ActorRef.nobody, loop=None):
+    def __init__(self,
+                 parent=ActorRef.nobody,
+                 loop=None,
+                 args=None,
+                 kwargs=None):
         self.parent = parent
         self.uuid = uuid4()
         self.life_cycle = ActorLifeCycle.born
@@ -68,11 +72,11 @@ class AsyncActor(metaclass=ActorMeta):
         self.mailbox = Mailbox(self.loop)
         self.context = ActorContext(self)
 
-        self.before_start()
+        self.before_start(*args, **kwargs)
 
         self.context.run(self._main())
 
-    def before_start(self):
+    def before_start(self, *args, **kwargs):
         pass
 
     def before_die(self):
