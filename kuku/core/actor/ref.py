@@ -1,31 +1,33 @@
-from asyncio import Future, wait_for, ensure_future, get_event_loop
+from asyncio import Future, wait_for, get_event_loop
 from functools import partial
 
-from kuku.core.actor.context import get_current_context
-from kuku.core.message import Envelope
+from .message import Envelope
 
-__all__ = [
+__all__ = (
     'ActorRef',
-    'RpcActorRef',
     'FunctionRef',
-]
+)
 
 
 def get_current_context_sender():
-    ctx = get_current_context()
+    ctx = getattr(get_event_loop(), 'actor_context', None)
     return ctx.sender if ctx is not None else None
 
 
 def get_current_context_timeout():
-    ctx = get_current_context()
+    ctx = getattr(get_event_loop(), 'actor_context', None)
     return ctx.default_timeout if ctx is not None else None
 
 
 class ActorRef(object):
     nobody = object()
 
-    def __init__(self, mailbox):
-        self._mailbox = mailbox
+    def __init__(self, actor):
+        self._mailbox = actor.mailbox
+        self._msg_types = {behav.__name__: msg_type
+                           for (msg_type, behav) in actor.behaviors.items()}
+        self.actor_type = type(actor)
+        self.actor_uuid = actor.uuid
 
     def tell(self, message, sender=None):
         sender = sender or get_current_context_sender() or self.nobody
@@ -41,13 +43,6 @@ class ActorRef(object):
 
         self._mailbox.put(Envelope(message, sender=FunctionRef(fn)))
         return wait_for(fut, timeout)
-
-
-class RpcActorRef(ActorRef):
-    def __init__(self, mailbox, behaviors):
-        super().__init__(mailbox)
-        self._msg_types = {behav.__name__: msg_type
-                           for (msg_type, behav) in behaviors.items()}
 
     def __getattr__(self, behav):
         if behav not in self._msg_types:

@@ -1,21 +1,18 @@
 import inspect
-from asyncio import get_event_loop
 from enum import Enum
 from uuid import uuid4
 
-from kuku.core.actor.context import ActorContext
-from kuku.core.actor.mailbox import Mailbox
-from kuku.core.actor.ref import ActorRef, RpcActorRef
-from kuku.core.message import Envelope, SystemMessage
+from .context import ActorContext
+from .mailbox import Mailbox
+from .message import Envelope, SystemMessage
 
-
-__all__ = [
+__all__ = (
     'ActorLifeCycle',
     'behavior',
     'ActorMeta',
     'AsyncActor',
     'base_actor'
-]
+)
 
 
 class ActorLifeCycle(Enum):
@@ -60,21 +57,17 @@ class AsyncActor(metaclass=ActorMeta):
     default_timeout = 60
     behaviors = {}
 
-    def __init__(self,
-                 parent=ActorRef.nobody,
-                 loop=None,
-                 args=None,
-                 kwargs=None):
+    def __init__(self, loop, parent, init_args, init_kwargs):
+        self.loop = loop
         self.parent = parent
         self.uuid = uuid4()
         self.life_cycle = ActorLifeCycle.born
-        self.loop = loop or get_event_loop()
         self.mailbox = Mailbox(self.loop)
         self.context = ActorContext(self)
 
-        self.before_start(*args, **kwargs)
+        self.before_start(*init_args, **init_kwargs)
 
-        self.context.run(self._main())
+        self.execution = self.context.run(self._main())
 
     def before_start(self, *args, **kwargs):
         pass
@@ -82,15 +75,9 @@ class AsyncActor(metaclass=ActorMeta):
     def before_die(self):
         pass
 
-    def actor_ref_factory(self):
-        return ActorRef(self.mailbox)
-
-    def context_factory(self, envelope):
-        return {'sender': envelope.sender}
-
-    @property
-    def ref(self):
-        return self.actor_ref_factory()
+    def message_context_factory(self, envelope):
+        return {'sender': envelope.sender,
+                'reply': ''}
 
     @property
     def sender(self):
@@ -107,7 +94,7 @@ class AsyncActor(metaclass=ActorMeta):
             try:
                 envelope = await self.mailbox.get()
                 assert isinstance(envelope, Envelope)
-                await self._open_envelope(envelope)
+                self._open_envelope(envelope)
                 if self.life_cycle == ActorLifeCycle.stopped:
                     break
             except Exception as e:
@@ -117,54 +104,24 @@ class AsyncActor(metaclass=ActorMeta):
         self.before_die()
         self.life_cycle = ActorLifeCycle.dead
 
-    async def _open_envelope(self, envelope):
-        ctx = self.context_factory(envelope)
+    def _open_envelope(self, envelope):
+        ctx = self.message_context_factory(envelope)
         behav = self._find_behavior(type(envelope.message))
         if inspect.iscoroutinefunction(behav):
-            self.context.run_with_context(
-                behav(self, envelope.message), ctx)
+            self.context.run_behavior(behav(self, envelope.message), ctx)
         else:
-            self.context.push(ctx)
+            self.context.set_msg_ctx(ctx)
             behav(self, envelope.message)
-            self.context.pop()
+            self.context.reset_msg_ctx()
 
     @behavior(object)
-    def unhandled(self, message):
+    def _unhandled(self, message):
         print('UnRegistered message type: {}'.format(type(message)))
 
     @behavior(SystemMessage)
-    def handle_system_message(self, message):
+    def _handle_system_message(self, message):
         if message.command == 'kill':
             self.life_cycle = ActorLifeCycle.stopped
 
 
-class RpcActor(AsyncActor):
-    def actor_ref_factory(self):
-        return RpcActorRef(self.mailbox, self.behaviors)
-
-
-base_actor = RpcActor
-
-
-class LoggingActor(base_actor):
-    @behavior(str)
-    def handle_message(self, message):
-        print(message)
-
-
-class EchoActor(base_actor):
-    @behavior(str)
-    async def handle_message(self, message):
-        self.sender.tell(message)
-
-
-if __name__ == '__main__':
-    log = LoggingActor().ref
-    log.tell('hello')
-    log.handle_message('world')
-
-    echo = EchoActor().ref
-    echo.tell('yollo', sender=log)
-
-    from asyncio import ensure_future
-    ensure_future(echo.ask('foo')).add_done_callback(lambda fut: print(fut.result()))
+base_actor = AsyncActor

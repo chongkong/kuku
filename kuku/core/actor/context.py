@@ -1,48 +1,72 @@
-from asyncio import Task, iscoroutine, get_event_loop
+from asyncio import Task, iscoroutine
 from inspect import ismethod
 
-__all__ = [
-    'StepAwareTask',
-    'ActorContext',
-    'get_current_context'
-]
+from .cluster import get_actor_by_uuid, spawn
+
+__all__ = (
+    'ActorContext'
+)
 
 
-class StepAwareTask(Task):
-    def __init__(self, coro, before_step, after_step, *, loop=None):
+class LoopContext(object):
+    def __init__(self, loop, actor_context, msg_ctx=None):
+        self.loop = loop
+        self.actor_context = actor_context
+        self.msg_ctx = msg_ctx
+
+    def __enter__(self):
+        self.loop.actor_context = self.actor_context
+        if self.msg_ctx:
+            self.actor_context.set_msg_ctx(self.msg_ctx)
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        del self.loop.actor_context
+        self.actor_context.reset_msg_ctx()
+
+
+class ContextAwareTask(Task):
+    def __init__(self, coro, actor_context, msg_ctx=None, loop=None):
         super().__init__(coro, loop=loop)
-        self._before_step = before_step
-        self._after_step = after_step
+        self._actor_context = actor_context
+        self._msg_ctx = msg_ctx
 
     def _step(self, *args, **kwargs):
-        self._before_step()
-        super()._step(*args, **kwargs)
-        self._after_step()
+        with LoopContext(self._loop,
+                         self._actor_context,
+                         self._msg_ctx):
+            super()._step(*args, **kwargs)
 
 
 class ActorContext(object):
     def __init__(self, actor):
-        self._contexts = []
+        self._backup = {}
         self._loop = actor.loop
+        self._ref = None
+        self._actor_uuid = actor.uuid
 
         self.parent = actor.parent
         self.sender = None
-        self.me = actor.ref
         self.default_timeout = actor.default_timeout
-        self.children = []
+        self.children = set([])
 
-    def push(self, ctx):
-        backup = {}
+    @property
+    def ref(self):
+        if self._ref is None:
+            self._ref = get_actor_by_uuid(self._actor_uuid)
+        return self._ref
+
+    def set_msg_ctx(self, ctx):
+        if len(self._backup) > 0:
+            self.reset_msg_ctx()  # Only one message context can be set at the moment
         for key, val in ctx.items():
             if hasattr(self, key) and not ismethod(getattr(self, key)):
-                backup[key] = getattr(self, key)
+                self._backup[key] = getattr(self, key)
                 setattr(self, key, val)
-        self._contexts.append(backup)
 
-    def pop(self):
-        backup = self._contexts.pop()
-        for key, val in backup.items():
+    def reset_msg_ctx(self):
+        for key, val in self._backup.items():
             setattr(self, key, val)
+        self._backup.clear()
 
     def run(self, coro):
         if not iscoroutine(coro):
@@ -50,33 +74,17 @@ class ActorContext(object):
                 'argument of run() should be a coroutine; '
                 '{} found'.format(type(coro)))
 
-        def before():
-            setattr(self._loop, 'actor_context', self)
+        return ContextAwareTask(coro, self, loop=self._loop)
 
-        def after():
-            delattr(self._loop, 'actor_context')
-
-        return StepAwareTask(coro, before, after, loop=self._loop)
-
-    def run_with_context(self, coro, ctx):
+    def run_behavior(self, coro, msg_ctx):
         if not iscoroutine(coro):
             raise TypeError(
-                'argument of run_with_context() should be a coroutine; '
+                'argument of run_behavior() should be a coroutine; '
                 '{} found'.format(type(coro)))
 
-        def before():
-            setattr(self._loop, 'actor_context', self)
-            self.push(ctx)
+        return ContextAwareTask(coro, self, msg_ctx, loop=self._loop)
 
-        def after():
-            delattr(self._loop, 'actor_context')
-            self.pop()
-
-        return StepAwareTask(coro, before, after, loop=self._loop)
-
-    def spawn(self, actor_type):
-        pass
-
-
-def get_current_context():
-    return getattr(get_event_loop(), 'actor_context', None)
+    def spawn(self, actor_type, *args, **kwargs):
+        child = spawn(actor_type, *args, parent=self.ref, **kwargs)
+        self.children.add(child)
+        return child
