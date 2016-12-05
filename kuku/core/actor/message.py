@@ -1,5 +1,3 @@
-from collections import namedtuple
-
 __all__ = (
     'SystemMessage',
     'Envelope'
@@ -19,4 +17,16 @@ class SystemMessage(object):
         return SystemMessage('kill')
 
 
-Envelope = namedtuple('Envelope', ['message', 'sender'])
+class Envelope(object):
+    __slots__ = (
+        'message',    # Contents of the envelope
+        'sender',     # Actor_ref who's sending this envelope
+        'req_token',  # Used in ask envelope (where to reply back)
+        'resp_token'  # Used in reply envelope (correspond to previous request_token)
+    )
+
+    def __init__(self, message, sender, req_token=None, resp_token=None):
+        self.message = message
+        self.sender = sender
+        self.req_token = req_token
+        self.resp_token = resp_token

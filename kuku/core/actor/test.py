@@ -1,4 +1,5 @@
-from kuku.core import base_actor, behavior, spawn
+from kuku.core import base_actor, spawn
+from kuku.core.actor.base import behavior
 
 
 class LoggingActor(base_actor):

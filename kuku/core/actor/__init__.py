@@ -1,3 +1,4 @@
+from .base import *
 from .message import *
 from .mailbox import *
 from .actor import *
@@ -5,6 +6,7 @@ from .ref import *
 from .cluster import *
 
 __all__ = (
+    base.__all__ +
     message.__all__ +
     mailbox.__all__ +
     actor.__all__ +
