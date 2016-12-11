@@ -11,16 +11,21 @@ class LoggingActor(base_actor):
 class EchoActor(base_actor):
     @behavior(str)
     async def handle_message(self, message):
-        self.sender.tell(message)
+        self.sender.reply(message)
+
+
+class TestActor(base_actor):
+    @behavior(str)
+    async def test(self, message):
+        if message == 'start':
+            log = spawn(LoggingActor)
+            log.tell('hello')
+
+            echo = spawn(EchoActor)
+            resp = await echo.ask('yollo')
+            log.tell(resp)
 
 
 if __name__ == '__main__':
-    log = spawn(LoggingActor)
-    log.tell('hello')
-    log.handle_message('world')
-
-    echo = spawn(EchoActor)
-    echo.tell('yollo', sender=log)
-
-    from asyncio import ensure_future
-    ensure_future(echo.ask('foo')).add_done_callback(lambda fut: print(fut.result()))
+    test = spawn(TestActor)
+    test.tell('start')

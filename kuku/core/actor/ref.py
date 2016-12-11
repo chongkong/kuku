@@ -5,7 +5,6 @@ from .message import Envelope
 
 __all__ = (
     'ActorRef',
-    'FunctionRef',
 )
 
 
@@ -14,7 +13,7 @@ def get_context_or_error():
 
 
 def get_context_or_none():
-    return getattr(Task.current_task(), 'actor_ctx')
+    return getattr(Task.current_task(), 'actor_ctx', None)
 
 
 class ActorRef(object):
@@ -30,7 +29,7 @@ class ActorRef(object):
     def tell(self, message, *, sender=None):
         if sender is None:
             ctx = get_context_or_none()
-            sender = ctx.me if ctx is not None else self.nobody
+            sender = ctx.ref if ctx is not None else self.nobody
 
         envelope = Envelope(message, sender)
         self._mailbox.put(envelope)
@@ -40,7 +39,7 @@ class ActorRef(object):
         fut = loop.create_future()
 
         ctx = get_context_or_error()
-        sender = sender or ctx.me
+        sender = sender or ctx.ref
         timeout = timeout or ctx.default_timeout
         req_token = ctx.issue_req_token(fut, timeout)
 
@@ -50,7 +49,7 @@ class ActorRef(object):
 
     def reply(self, message, *, sender=None):
         ctx = get_context_or_error()
-        sender = sender or ctx.me
+        sender = sender or ctx.ref
         resp_token = ctx.req_token
 
         envelope = Envelope(message, sender, resp_token=resp_token)
@@ -61,7 +60,7 @@ class ActorRef(object):
         fut = loop.create_future()
 
         ctx = get_context_or_error()
-        sender = sender or ctx.me
+        sender = sender or ctx.ref
         req_token = ctx.issue_req_token(fut, timeout)
         resp_token = ctx.req_token
 

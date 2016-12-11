@@ -67,6 +67,10 @@ class ActorContext(object):
         return self._actor.uuid
 
     @property
+    def default_timeout(self):
+        return type(self._actor).default_timeout
+
+    @property
     def sender(self):
         return self.envelope.sender if self.envelope else None
 
