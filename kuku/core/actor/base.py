@@ -7,7 +7,6 @@ __all__ = (
     'UnknownMessageTypeError',
     'ActorLifeCycle',
     'MSG_TYPE_KEY',
-    'TASK_KEY',
     'behavior'
 )
 
