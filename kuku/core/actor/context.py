@@ -5,7 +5,7 @@ from functools import partial
 from pip.utils import cached_property
 
 from kuku.util import random_alphanumeric
-from .message import Envelope
+from .message import ErrorForward
 from .cluster import get_actor_by_uuid, spawn
 
 __all__ = (
@@ -14,46 +14,69 @@ __all__ = (
 
 
 class ContextAwareTask(Task):
-    def __init__(self, coro, actor_ctx, msg_ctx=None, loop=None):
-        super().__init__(coro, loop=loop)
+    def __init__(self, coro, actor_ctx):
+        super().__init__(coro, loop=actor_ctx.loop)
         self.actor_ctx = actor_ctx
-        self.msg_ctx = msg_ctx
+        self.envelope = actor_ctx.envelope
 
     def _step(self, *args, **kwargs):
-        self.actor_ctx.set_msg_ctx(self.msg_ctx)
-        try:
+        with self.actor_ctx.msg_scope(self.envelope):
             super()._step(*args, **kwargs)
-        finally:
-            self.actor_ctx.reset_msg_ctx()
 
 
-class MessageContext(object):
-    __slots__ = ('sender', 'req_token', 'resp_token')
+class MessageScope(object):
+    __slots__ = ('actor_ctx', 'envelope')
 
-    def __init__(self, envelope):
-        assert isinstance(envelope, Envelope)
-        self.sender = envelope.sender
-        self.req_token = envelope.req_token
-        self.resp_token = envelope.resp_token
+    def __init__(self, actor_ctx, envelope):
+        self.actor_ctx = actor_ctx
+        self.envelope = envelope
+
+    def __enter__(self):
+        self.actor_ctx.envelope = self.envelope
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.actor_ctx.envelope = None
 
 
 ReplyInboxItem = namedtuple('ReplyInboxItem', ['reply_fut', 'timer_handle', 'task'])
 
 
 class ActorContext(object):
-    def __init__(self, actor):
-        self._msg_ctx = None
-        self._loop = actor.loop
+    def __init__(self, actor, loop):
+        self._actor = actor
+        self._loop = loop
 
+        self.envelope = None
         self.reply_inbox = {}
-        self.actor_uuid = actor.uuid
-        self.parent = actor.parent
-        self.default_timeout = actor.default_timeout
         self.children = set([])
+
+    @property
+    def loop(self):
+        return self._loop
+
+    @property
+    def parent(self):
+        return self._actor.parent
 
     @cached_property
     def ref(self):
-        return get_actor_by_uuid(self.actor_uuid)
+        return get_actor_by_uuid(self._actor.uuid)
+
+    @property
+    def actor_uuid(self):
+        return self._actor.uuid
+
+    @property
+    def sender(self):
+        return self.envelope.sender if self.envelope else None
+
+    @property
+    def req_token(self):
+        return self.envelope.req_token if self.envelope else None
+
+    @property
+    def resp_token(self):
+        return self.envelope.resp_token if self.envelope else None
 
     def issue_req_token(self, reply_fut, timeout):
         token = random_alphanumeric(6)
@@ -78,60 +101,37 @@ class ActorContext(object):
             item.reply_fut.set_exception(TimeoutError)
             item.timer_handle.cancel()
 
-    def raise_reply_exc(self, token, exc, msg_ctx):
+    def resolve_reply(self, envelope):
+        token = envelope.resp_token
         if token in self.reply_inbox:
             item = self.reply_inbox.pop(token)
-            item.reply_fut.set_exception(exc)
+            if isinstance(envelope.message, ErrorForward):
+                item.reply_fut.set_exception(envelope.message.error)
+            else:
+                item.reply_fut.set_result(envelope.message)
             item.timer_handle.cancel()
-            item.task.msg_ctx = msg_ctx
+            item.task.envelope = envelope
 
-    def resolve_reply(self, token, reply, msg_ctx):
-        if token in self.reply_inbox:
-            item = self.reply_inbox.pop(token)
-            item.reply_fut.set_result(reply)
-            item.timer_handle.cancel()
-            item.task.msg_ctx = msg_ctx
+    def msg_scope(self, envelope):
+        return MessageScope(self, envelope)
 
-    def set_msg_ctx(self, msg_ctx):
-        self._msg_ctx = msg_ctx
+    def run_main(self, coro):
+        return ContextAwareTask(coro, self)
 
-    def reset_msg_ctx(self):
-        self._msg_ctx = None
-
-    @property
-    def sender(self):
-        return self._msg_ctx.sender if self._msg_ctx else None
-
-    @property
-    def req_token(self):
-        return self._msg_ctx.req_token if self._msg_ctx else None
-
-    @property
-    def resp_token(self):
-        return self._msg_ctx.resp_token if self._msg_ctx else None
-
-    def run(self, coro):
-        if not iscoroutine(coro):
-            raise TypeError(
-                'argument of run() should be a coroutine; '
-                '{} found'.format(type(coro)))
-
-        return ContextAwareTask(coro, self, loop=self._loop)
-
-    def run_behavior(self, behav, msg_ctx):
+    def run_coroutine_behavior(self, behav):
         if not iscoroutine(behav):
             raise TypeError(
                 'argument of run_behavior() should be a coroutine; '
                 '{} found'.format(type(behav)))
 
         return ContextAwareTask(
-            self._wrap_exc(behav), self, msg_ctx, loop=self._loop)
+            self._wrap_exc(behav), self)
 
-    async def _wrap_exc(self, behav):
+    async def _wrap_exc(self, coro):
         try:
-            await behav
+            await coro
         except Exception as e:
-            if self._msg_ctx.req_token:
+            if self.envelope.req_token:
                 self.sender.reply(e)
 
     def spawn(self, actor_type, *args, **kwargs):

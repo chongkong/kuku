@@ -2,7 +2,7 @@ import inspect
 from uuid import uuid4
 
 from .base import ActorLifeCycle, behavior, MSG_TYPE_KEY, UnknownMessageTypeError
-from .context import ActorContext, MessageContext
+from .context import ActorContext
 from .mailbox import Mailbox
 from .message import SystemMessage
 
@@ -42,16 +42,15 @@ class AsyncActor(metaclass=ActorMeta):
     behaviors = {}
 
     def __init__(self, loop, parent, init_args, init_kwargs):
-        self.loop = loop
         self.parent = parent
         self.uuid = uuid4()
         self.life_cycle = ActorLifeCycle.born
-        self.mailbox = Mailbox(self.loop)
-        self.context = ActorContext(self)
+        self.mailbox = Mailbox(loop)
+        self.context = ActorContext(self, loop)
 
         self.before_start(*init_args, **init_kwargs)
 
-        self.execution = self.context.run(self._main())
+        self.execution = self.context.run_main(self._main())
 
     def before_start(self, *args, **kwargs):
         pass
@@ -63,33 +62,26 @@ class AsyncActor(metaclass=ActorMeta):
     def sender(self):
         return self.context.sender
 
-    def _find_behavior(self, msg_type):
-        for type_ in msg_type.mro():
+    def _find_behavior(self, msg):
+        for type_ in type(msg).mro():
             if type_ in self.behaviors:
                 return self.behaviors[type_]
-        raise UnknownMessageTypeError('Unknown message type: {}'.format(msg_type))
+        raise UnknownMessageTypeError('Unknown message type: {}'.format(type(msg)))
 
     async def _main(self):
         while True:
             try:
                 envelope = await self.mailbox.get()
-                msg_ctx = MessageContext(envelope)
-                if msg_ctx.resp_token:
-                    if isinstance(envelope.message, Exception):
-                        self.context.raise_reply_exc(
-                            msg_ctx.resp_token, envelope.message, msg_ctx)
-                    else:
-                        self.context.resolve_reply(
-                            msg_ctx.resp_token, envelope.message, msg_ctx)
+                if envelope.resp_token:
+                    self.context.resolve_reply(envelope)
                 else:
-                    behav = self._find_behavior(type(envelope.message))
-                    if inspect.iscoroutinefunction(behav):
-                        self.context.run_behavior(
-                            self._monitor_coro_behav(behav, envelope.message), msg_ctx)
-                    else:
-                        self.context.set_msg_ctx(msg_ctx)
-                        behav(self, envelope.message)
-                        self.context.reset_msg_ctx()
+                    behav = self._find_behavior(envelope.message)
+                    with self.context.msg_scope(envelope):
+                        if inspect.iscoroutinefunction(behav):
+                            self.context.run_coroutine_behavior(
+                                behav(self, envelope.message))
+                        else:
+                            behav(self, envelope.message)
 
                 if self.life_cycle == ActorLifeCycle.stopped:
                     break
@@ -99,13 +91,6 @@ class AsyncActor(metaclass=ActorMeta):
 
         self.before_die()
         self.life_cycle = ActorLifeCycle.dead
-
-    async def _monitor_coro_behav(self, behav, message):
-        try:
-            await behav(self, message)
-        except Exception as e:
-            if self.context.req_token is not None:
-                pass
 
     @behavior(object)
     def _unhandled(self, message):

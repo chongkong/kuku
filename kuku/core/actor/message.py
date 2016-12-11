@@ -1,5 +1,6 @@
 __all__ = (
     'SystemMessage',
+    'ErrorForward',
     'Envelope'
 )
 
@@ -15,6 +16,13 @@ class SystemMessage(object):
     @staticmethod
     def kill():
         return SystemMessage('kill')
+
+
+class ErrorForward(object):
+    __slots__ = ('error', )
+
+    def __init__(self, error):
+        self.error = error
 
 
 class Envelope(object):
