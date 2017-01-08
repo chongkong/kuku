@@ -1,45 +1,41 @@
 import inspect
 from uuid import uuid4
 
-from .base import ActorLifeCycle, behavior, MSG_TYPE_KEY, UnknownMessageTypeError
+from .action_tree import ActionTree
+from .base import ActorLifeCycle, UnknownMessageTypeError
 from .context import ActorContext
 from .mailbox import Mailbox
 from .message import SystemMessage
 
 __all__ = (
     'ActorMeta',
-    'AsyncActor',
+    'Actor',
     'base_actor'
 )
 
 
 class ActorMeta(type):
-    @classmethod
-    def __prepare__(mcs, name, bases):
-        return {'behaviors': {}}
+    def __new__(mcs, name, bases, attrs):
+        actor_class = super().__new__(mcs, name, bases, attrs)
 
-    def __new__(mcs, name, bases, attrs, **kwargs):
-        actor = super().__new__(mcs, name, bases, attrs)
-
-        class_behaviors = [
+        actor_actions = [
             attr for attr in attrs.values()
-            if hasattr(attr, MSG_TYPE_KEY)]
-        base_behaviors = [
+            if hasattr(attr, 'trigger_tags')
+        ]
+        base_actors_actions = [
             attr for base in bases
             for attr in base.__dict__.values()
-            if hasattr(attr, MSG_TYPE_KEY)]
+            if hasattr(attr, 'trigger_tags')
+        ]
 
-        for behav in class_behaviors + base_behaviors:
-            msg_type = getattr(behav, MSG_TYPE_KEY)
-            if msg_type not in actor.behaviors:
-                actor.behaviors[msg_type] = behav
-
-        return actor
+        actor_class.action_tree = ActionTree(
+            base_actors_actions + actor_actions)
+        return actor_class
 
 
-class AsyncActor(metaclass=ActorMeta):
+class Actor(object, metaclass=ActorMeta):
     default_timeout = 60
-    behaviors = {}
+    action_tree = None
 
     def __init__(self, loop, parent, init_args, init_kwargs):
         self.parent = parent
@@ -62,26 +58,11 @@ class AsyncActor(metaclass=ActorMeta):
     def sender(self):
         return self.context.sender
 
-    def _find_behavior(self, msg):
-        for type_ in type(msg).mro():
-            if type_ in self.behaviors:
-                return self.behaviors[type_]
-        raise UnknownMessageTypeError('Unknown message type: {}'.format(type(msg)))
-
     async def _main(self):
         while True:
             try:
                 envelope = await self.mailbox.get()
-                if envelope.resp_token:
-                    self.context.resolve_reply(envelope)
-                else:
-                    behav = self._find_behavior(envelope.message)
-                    with self.context.msg_scope(envelope):
-                        if inspect.iscoroutinefunction(behav):
-                            self.context.run_coroutine_behavior(
-                                behav(self, envelope.message))
-                        else:
-                            behav(self, envelope.message)
+                self._handle_envelope(envelope)
 
                 if self.life_cycle == ActorLifeCycle.stopped:
                     break
@@ -92,14 +73,34 @@ class AsyncActor(metaclass=ActorMeta):
         self.before_die()
         self.life_cycle = ActorLifeCycle.dead
 
-    @behavior(object)
-    def _unhandled(self, message):
-        print('UnRegistered message type: {}'.format(type(message)))
+    async def _handle_envelope(self, envelope):
+        if envelope.resp_token:
+            self.context.resolve_reply(envelope)
+            return
 
-    @behavior(SystemMessage)
-    def _handle_system_message(self, message):
+        if envelope.internal:
+            self._handle_internal(envelope.message)
+            return
+
+        if envelope.rpc:
+            action, message = self.action_tree.resolve_rpc(
+                envelope.rpc.action_name, envelope.rpc.args,
+                envelope.rpc.kwargs)
+        elif envelope.message:
+            action = self.action_tree.resolve_message_action(envelope.message)
+            message = envelope.message
+        else:
+            return
+
+        with self.context.msg_scope(envelope):
+            if inspect.iscoroutinefunction(action):
+                self.context.run_coroutine_behavior(action(self, message))
+            else:
+                action(self, message)
+
+    def _handle_internal(self, message):
         if message.command == 'kill':
             self.life_cycle = ActorLifeCycle.stopped
 
 
-base_actor = AsyncActor
+base_actor = Actor
