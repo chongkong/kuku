@@ -1,7 +1,6 @@
 import logging
 
 from kuku import actor
-from kuku.actor import cluster
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -15,7 +14,7 @@ class LoggingActor(actor.Actor):
 class EchoActor(actor.Actor):
     @actor.rpc(reply=True)
     async def echo(self, message):
-        self.sender.reply(message)
+        self.sender.tell(message)
 
 
 class TestActor(actor.Actor):
@@ -31,6 +30,5 @@ class TestActor(actor.Actor):
 
 
 if __name__ == '__main__':
-    cluster.init()
     test = actor.spawn(TestActor)
     test.tell('start')

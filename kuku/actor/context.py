@@ -4,7 +4,7 @@ import functools
 import logging
 
 from kuku import util
-from kuku.actor import cluster
+from kuku.actor import node
 from kuku.actor import message as msg
 
 __all__ = [
@@ -24,7 +24,7 @@ WaitingItem = collections.namedtuple('WaitingItem', [
 class ActorContext(object):
     def __init__(self, actor, loop):
         self._actor = actor
-        self._ref = cluster.get_actor_by_uuid(actor.uuid)
+        self._ref = node.get_actor_by_uuid(actor.uuid)
         self._loop = loop
         self._main_task = None
         self._waitings = {}
@@ -40,7 +40,7 @@ class ActorContext(object):
 
     @property
     def ref(self):
-        return cluster.get_actor_by_uuid(self._actor.uuid)
+        return node.get_actor_by_uuid(self._actor.uuid)
 
     @property
     def _env(self):
@@ -57,15 +57,18 @@ class ActorContext(object):
 
     @property
     def sender(self):
-        return self._env.sender if self._env else None
+        if self._env:
+            return self._env.sender
 
     @property
     def req_token(self):
-        return self._env.req_token if self._env else None
+        if self._env:
+            return self._env.req_token
 
     @property
     def resp_token(self):
-        return self._env.resp_token if self._env else None
+        if self._env:
+            return self._env.resp_token
 
     def issue_req_token(self, reply_fut, timeout):
         token = util.random_alphanumeric(6)
@@ -127,7 +130,7 @@ class ActorContext(object):
                 self.sender.reply(e)
 
     def spawn(self, actor_type, *args, **kwargs):
-        child = cluster.spawn(actor_type, *args, parent=self.ref, **kwargs)
+        child = node.spawn(actor_type, *args, parent=self.ref, **kwargs)
         self._children.add(child)
         return child
 

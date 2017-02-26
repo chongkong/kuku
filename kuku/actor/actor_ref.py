@@ -28,23 +28,41 @@ def _get_context_or_none():
 class ActorRef(object):
     nobody = util.create_named_singleton('Nobody')
 
+    def tell(self, message, *, sender=None, msg_type=msg.MsgType.NORMAL):
+        pass
+
+    def ask(self, message, *, sender=None, timeout=None,
+            msg_type=msg.MsgType.NORMAL):
+        pass
+
+
+class LocalActorRef(ActorRef):
+
     def __init__(self, mailbox, actor_type, uuid):
         self._mailbox = mailbox
         self.actor_type = actor_type
         self.uuid = uuid
 
     def tell(self, message, *, sender=None, msg_type=msg.MsgType.NORMAL):
-        if sender is None:
-            actor_ctx = _get_context_or_none()
-            sender = actor_ctx.ref if actor_ctx is not None else self.nobody
+        actor_ctx = _get_context_or_none()
+        resp_token = None
+        if actor_ctx is not None:
+            if sender is None:
+                sender = actor_ctx.ref
+            resp_token = actor_ctx.req_token
+        else:
+            if sender is None:
+                sender = self.nobody
 
-        envelope = msg.Envelope(msg_type, message, sender)
+        envelope = msg.Envelope(msg_type, message, sender,
+                                resp_token=resp_token)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f'Tell {repr(sender)} -> {repr(self)}\n'
-                         f'>\t[{msg_type.name}] {message}')
+                         f'>\t{envelope}')
         self._mailbox.put(envelope)
 
-    def ask(self, message, *, sender=None, timeout=None, msg_type=msg.MsgType.NORMAL):
+    def ask(self, message, *, sender=None, timeout=None,
+            msg_type=msg.MsgType.NORMAL):
         loop = asyncio.get_event_loop()
         fut = loop.create_future()
 
@@ -52,44 +70,15 @@ class ActorRef(object):
         sender = sender or actor_ctx.ref
         timeout = timeout or actor_ctx.default_timeout
         req_token = actor_ctx.issue_req_token(fut, timeout)
+        resp_token = actor_ctx.req_token
 
-        envelope = msg.Envelope(msg_type, message, sender, req_token=req_token)
+        envelope = msg.Envelope(msg_type, message, sender,
+                                req_token=req_token, resp_token=resp_token)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f'Ask {repr(sender)} -> {repr(self)}\n'
-                         f'>\t[{msg_type.name}] {message}\n'
-                         f'>\treq_token: {repr(req_token)}')
+                         f'>\t{envelope}')
         self._mailbox.put(envelope)
         return fut
-
-    def reply(self, message, *, sender=None, msg_type=msg.MsgType.NORMAL):
-        actor_ctx = _get_context_or_error()
-        sender = sender or actor_ctx.ref
-        resp_token = actor_ctx.req_token
-
-        envelope = msg.Envelope(msg_type, message, sender, resp_token=resp_token)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f'Reply {repr(sender)} -> {repr(self)}\n'
-                         f'>\t[{msg_type.name}] {message}\n'
-                         f'>\tresp_token: {repr(resp_token)}')
-        self._mailbox.put(envelope)
-
-    def reply_and_ask(self, message, *, sender=None, timeout=None, msg_type=msg.MsgType.NORMAL):
-        loop = asyncio.get_event_loop()
-        fut = loop.create_future()
-
-        actor_ctx = _get_context_or_error()
-        sender = sender or actor_ctx.ref
-        req_token = actor_ctx.issue_req_token(fut, timeout)
-        resp_token = actor_ctx.req_token
-
-        envelope = msg.Envelope.normal(message, sender, req_token=req_token,
-                                       resp_token=resp_token)
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f'Reply And Ask {repr(sender)} -> {repr(self)}\n'
-                         f'>\t[{msg_type.name}] {message}\n'
-                         f'>\treq_token: {repr(req_token)}\n'
-                         f'>\tresp_token: {repr(resp_token)}')
-        self._mailbox.put(envelope)
 
     def __getattr__(self, action_name):
         if action_name not in self.actor_type.rpc_actions:
@@ -107,4 +96,4 @@ class ActorRef(object):
             self.tell(message, sender=sender, msg_type=msg.MsgType.RPC)
 
     def __repr__(self):
-        return f'{self.actor_type.__name__}#{str(self.uuid)[:6]}'
+        return f'Local({self.actor_type.__name__})#{str(self.uuid)[:6]}'
