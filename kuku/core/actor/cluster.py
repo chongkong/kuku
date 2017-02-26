@@ -1,28 +1,28 @@
-from threading import get_ident, Thread
+import asyncio
 import random
-from asyncio import new_event_loop, set_event_loop
+import threading
 
-from .ref import ActorRef
+from kuku.core.actor import actor_ref as ref
 
-__all__ = (
+__all__ = [
     'get_actors',
     'get_actor_by_uuid',
     'get_singleton_actor',
     'spawn',
     'spawn_singleton'
-)
+]
 
 
-def configure():
+def config():
     return {
         'thread_count': 1,
     }
 
 
 def event_loop_thread(register_loop):
-    loop = new_event_loop()
-    set_event_loop(loop)
-    register_loop(get_ident(), loop)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    register_loop(threading.get_ident(), loop)
     loop.run_forever()
 
 
@@ -40,7 +40,7 @@ class ActorRegistry(object):
             self.actors[actor_ref.actor_type] = {actor_ref}
         else:
             self.actors[actor_ref.actor_type].add(actor_ref)
-        self.actors_by_uuid[actor_ref.actor_uuid] = actor_ref
+        self.actors_by_uuid[actor_ref.uuid] = actor_ref
 
     def register_singleton_actor(self, actor_ref):
         assert actor_ref.actor_type not in self.actors, \
@@ -65,11 +65,14 @@ class ActorCluster(object):
     instance = None
 
     def __init__(self, registry):
-        assert self.instance is None, \
+        assert ActorCluster.instance is None, \
             'Only one ActorCluster can be used'
-        self._config = configure()
+        ActorCluster.instance = self
+
+        self._config = config()
         self._loops = {}
-        self._threads = [Thread(target=event_loop_thread, args=[self._register_loop])
+        self._threads = [threading.Thread(target=event_loop_thread,
+                                          args=[self._register_loop])
                          for _ in range(self._config['thread_count'])]
         for t in self._threads:
             t.start()
@@ -104,8 +107,10 @@ def create_cluster():
     ActorCluster.instance = ActorCluster(registry)
 
 
-# Create singleton cluster!
-create_cluster()
+def init():
+    if ActorCluster.instance is None:
+        create_cluster()
+    return ActorCluster.instance
 
 
 def get_actors(actor_type):
@@ -120,17 +125,22 @@ def get_singleton_actor(actor_type):
     return ActorCluster.instance.get_singleton_actor(actor_type)
 
 
-def spawn(actor_type, *args, parent=ActorRef.nobody, **kwargs):
+def spawn(actor_type, *args, parent=None, **kwargs):
+    if parent is None:
+        parent = ref.ActorRef.nobody
     actor = actor_type(ActorCluster.instance.get_loop(), parent, args, kwargs)
-    ref = ActorRef(actor)
-    ActorCluster.instance.register_actor(ref)
-    return ref
+    actor_ref = ref.ActorRef(actor.mailbox, type(actor), actor.uuid)
+    ActorCluster.instance.register_actor(actor_ref)
+    return actor_ref
 
 
-def spawn_singleton(actor_type, *args, parent=ActorRef.nobody, **kwargs):
-    ref = ActorCluster.instance.get_singleton_actor(actor_type)
-    if ref is None:
+def spawn_singleton(actor_type, *args, parent=None, **kwargs):
+    if parent is None:
+        parent = ref.ActorRef.nobody
+    actor_ref = ActorCluster.instance.get_singleton_actor(actor_type)
+    if actor_ref is None:
         actor = actor_type(ActorCluster.instance.get_loop(), parent, args, kwargs)
-        ref = ActorRef(actor)
-        ActorCluster.instance.register_singleton_actor(ref)
-    return ref
+        actor_ref = ref.ActorRef(actor.mailbox, type(actor), actor.uuid)
+        ActorCluster.instance.register_singleton_actor(actor_ref)
+    return actor_ref
+

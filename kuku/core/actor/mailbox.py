@@ -1,8 +1,8 @@
 from asyncio import Queue
 
-__all__ = (
+__all__ = [
     'Mailbox',
-)
+]
 
 
 class Mailbox(object):

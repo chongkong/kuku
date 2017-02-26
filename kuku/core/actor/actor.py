@@ -1,52 +1,71 @@
-import inspect
-from uuid import uuid4
+import asyncio
+import enum
+import logging
+import typing as tp
+import uuid
 
-from .action_tree import ActionTree
-from .base import ActorLifeCycle, UnknownMessageTypeError
-from .context import ActorContext
-from .mailbox import Mailbox
-from .message import SystemMessage
+from kuku.core.actor import action as tree
+from kuku.core.actor import actor_ref as ref
+from kuku.core.actor import exception as exc
+from kuku.core.actor import context as ctx
+from kuku.core.actor import mailbox
+from kuku.core.actor import message as msg
 
-__all__ = (
+__all__ = [
+    'ActorState',
     'ActorMeta',
-    'Actor',
-    'base_actor'
-)
+    'Actor'
+]
+
+logger = logging.getLogger(__name__)
+
+
+class ActorState(enum.Enum):
+    BORN = 1
+    RUNNING = 2
+    STOPPED = 3
+    DEAD = 4
 
 
 class ActorMeta(type):
     def __new__(mcs, name, bases, attrs):
         actor_class = super().__new__(mcs, name, bases, attrs)
 
-        actor_actions = [
-            attr for attr in attrs.values()
-            if hasattr(attr, 'trigger_tags')
-        ]
-        base_actors_actions = [
-            attr for base in bases
-            for attr in base.__dict__.values()
-            if hasattr(attr, 'trigger_tags')
-        ]
+        trigger_actions = []
+        rpc_actions = {}
 
-        actor_class.action_tree = ActionTree(
-            base_actors_actions + actor_actions)
+        def pick_trigger_or_rpc(meth):
+            if hasattr(meth, 'triggers'):
+                trigger_actions.append(meth)
+            if hasattr(meth, 'rpc'):
+                rpc_actions[meth.__name__] = meth
+
+        for method in attrs.values():
+            pick_trigger_or_rpc(method)
+        for base_class in bases:
+            for method in base_class.__dict__.values():
+                pick_trigger_or_rpc(method)
+
+        actor_class.action_tree = tree.ActionTree(trigger_actions)
+        actor_class.rpc_actions = rpc_actions
         return actor_class
 
 
 class Actor(object, metaclass=ActorMeta):
     default_timeout = 60
-    action_tree = None
+    action_tree = None  # filled by ActorMeta
+    rpc_actions = None  # filled by ActorMeta
 
     def __init__(self, loop, parent, init_args, init_kwargs):
         self.parent = parent
-        self.uuid = uuid4()
-        self.life_cycle = ActorLifeCycle.born
-        self.mailbox = Mailbox(loop)
-        self.context = ActorContext(self, loop)
+        self.uuid = uuid.uuid4()
+        self.life_state = ActorState.BORN
+        self.mailbox = mailbox.Mailbox(loop)
+        self.context = ctx.ActorContext(self, loop)
+        self.logger = logging.getLogger(f'{self}')
 
         self.before_start(*init_args, **init_kwargs)
-
-        self.execution = self.context.run_main(self._main())
+        self.context.run_main(self._main())
 
     def before_start(self, *args, **kwargs):
         pass
@@ -62,45 +81,55 @@ class Actor(object, metaclass=ActorMeta):
         while True:
             try:
                 envelope = await self.mailbox.get()
-                self._handle_envelope(envelope)
-
-                if self.life_cycle == ActorLifeCycle.stopped:
-                    break
-            except Exception as e:
-                print('Error occurred: {}'.format(e))
+                if envelope.type == msg.MsgType.INTERNAL:
+                    self._handle_internal(envelope.message)
+                    if self.life_state == ActorState.STOPPED:
+                        break
+                self.context.run_with_context(envelope, self._handle_envelope(envelope))
+            except exc.Error:
+                self.logger.exception(f'Error occurred in {self}')
                 # TODO: supervised by parent
 
         self.before_die()
-        self.life_cycle = ActorLifeCycle.dead
+        self.life_state = ActorState.DEAD
 
     async def _handle_envelope(self, envelope):
-        if envelope.resp_token:
-            self.context.resolve_reply(envelope)
-            return
+        try:
+            if envelope.resp_token:
+                self.logger.debug(f'Received reply for {repr(envelope.resp_token)}')
+                self.context.resolve_reply(envelope)
+                return
 
-        if envelope.internal:
-            self._handle_internal(envelope.message)
-            return
-
-        if envelope.rpc:
-            action, message = self.action_tree.resolve_rpc(
-                envelope.rpc.action_name, envelope.rpc.args,
-                envelope.rpc.kwargs)
-        elif envelope.message:
-            action = self.action_tree.resolve_message_action(envelope.message)
             message = envelope.message
-        else:
-            return
-
-        with self.context.msg_scope(envelope):
-            if inspect.iscoroutinefunction(action):
-                self.context.run_coroutine_behavior(action(self, message))
+            if envelope.type == msg.MsgType.RPC:
+                action = self.rpc_actions.get(message.action_name)
+                self.logger.debug(f'Received rpc {message}')
+                if action is None:
+                    raise exc.BadMessageError(f'No RPC found for {repr(message.action_name)}')
+                if asyncio.iscoroutinefunction(action):
+                    await action(self, *message.args, **message.kwargs)
+                else:
+                    action(self, *message.args, **message.kwargs)
+            elif envelope.type == msg.MsgType.NORMAL:
+                action = self.action_tree.resolve_action(message)
+                self.logger.debug(f'Received message {repr(message)}')
+                if action is None:
+                    raise exc.BadMessageError(f'No handler found for {repr(message)}')
+                if asyncio.iscoroutinefunction(action):
+                    await action(self, message)
+                else:
+                    action(self, message)
             else:
-                action(self, message)
+                raise exc.BadEnvelopeError(f'Invalid envelope type {envelope.type.name}')
+        except Exception as e:
+            logger.exception("Error occurred while executing action")
+            if self.context.req_token:
+                self.sender.reply(e, msg_type=msg.MsgType.ERROR)
 
     def _handle_internal(self, message):
-        if message.command == 'kill':
-            self.life_cycle = ActorLifeCycle.stopped
+        logger.debug(f'Received internal message {repr(message)}')
+        if message == 'die':
+            self.life_state = ActorState.STOPPED
 
-
-base_actor = Actor
+    def __repr__(self):
+        return f'{type(self).__name__}#{str(self.uuid)[:6]}'

@@ -1,54 +1,34 @@
-from asyncio import Task, iscoroutine, TimeoutError
-from collections import namedtuple
-from functools import partial
+import asyncio
+import collections
+import functools
+import logging
 
-from pip.utils import cached_property
+from kuku import util
+from kuku.core.actor import message as msg
+from kuku.core.actor import cluster
 
-from kuku.util import random_alphanumeric
-from .message import ErrorForward
-from .cluster import get_actor_by_uuid, spawn
-
-__all__ = (
+__all__ = [
     'ActorContext'
-)
+]
+
+logger = logging.getLogger(__name__)
 
 
-class ContextAwareTask(Task):
-    def __init__(self, coro, actor_ctx):
-        super().__init__(coro, loop=actor_ctx.loop)
-        self.actor_ctx = actor_ctx
-        self.envelope = actor_ctx.envelope
-
-    def _step(self, *args, **kwargs):
-        with self.actor_ctx.msg_scope(self.envelope):
-            super()._step(*args, **kwargs)
-
-
-class MessageScope(object):
-    __slots__ = ('actor_ctx', 'envelope')
-
-    def __init__(self, actor_ctx, envelope):
-        self.actor_ctx = actor_ctx
-        self.envelope = envelope
-
-    def __enter__(self):
-        self.actor_ctx.envelope = self.envelope
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.actor_ctx.envelope = None
-
-
-ReplyInboxItem = namedtuple('ReplyInboxItem', ['reply_fut', 'timer_handle', 'task'])
+WaitingItem = collections.namedtuple('WaitingItem', [
+    'reply_fut',
+    'timer_handle',
+    'task'
+])
 
 
 class ActorContext(object):
     def __init__(self, actor, loop):
         self._actor = actor
+        self._ref = cluster.get_actor_by_uuid(actor.uuid)
         self._loop = loop
-
-        self.envelope = None
-        self.reply_inbox = {}
-        self.children = set([])
+        self._main_task = None
+        self._waitings = {}
+        self._children = set([])
 
     @property
     def loop(self):
@@ -58,9 +38,14 @@ class ActorContext(object):
     def parent(self):
         return self._actor.parent
 
-    @cached_property
+    @property
     def ref(self):
-        return get_actor_by_uuid(self._actor.uuid)
+        return cluster.get_actor_by_uuid(self._actor.uuid)
+
+    @property
+    def _env(self):
+        task = asyncio.Task.current_task(self._loop)
+        return getattr(task, 'envelope', None)
 
     @property
     def actor_uuid(self):
@@ -68,80 +53,83 @@ class ActorContext(object):
 
     @property
     def default_timeout(self):
-        return type(self._actor).default_timeout
+        return self._actor.default_timeout
 
     @property
     def sender(self):
-        return self.envelope.sender if self.envelope else None
+        return self._env.sender if self._env else None
 
     @property
     def req_token(self):
-        return self.envelope.req_token if self.envelope else None
+        return self._env.req_token if self._env else None
 
     @property
     def resp_token(self):
-        return self.envelope.resp_token if self.envelope else None
+        return self._env.resp_token if self._env else None
 
     def issue_req_token(self, reply_fut, timeout):
-        token = random_alphanumeric(6)
-        while token in self.reply_inbox:
-            token = random_alphanumeric(6)
+        token = util.random_alphanumeric(6)
+        while token in self._waitings:
+            token = util.random_alphanumeric(6)
 
         timer_handle = self._loop.call_later(
-            timeout, partial(self.timeout_reply, token))
-        self.reply_inbox[token] = ReplyInboxItem(
-            reply_fut, timer_handle, Task.current_task(self._loop))
+            timeout, functools.partial(self.timeout_reply, token))
+        self._waitings[token] = WaitingItem(
+            reply_fut, timer_handle, asyncio.Task.current_task(self._loop))
         return token
 
     def cancel_reply(self, token):
-        if token in self.reply_inbox:
-            item = self.reply_inbox.pop(token)
+        if token in self._waitings:
+            item = self._waitings.pop(token)
             item.reply_fut.cancel()
             item.timer_handle.cancel()
 
     def timeout_reply(self, token):
-        if token in self.reply_inbox:
-            item = self.reply_inbox.pop(token)
+        if token in self._waitings:
+            item = self._waitings.pop(token)
             item.reply_fut.set_exception(TimeoutError)
             item.timer_handle.cancel()
 
     def resolve_reply(self, envelope):
         token = envelope.resp_token
-        if token in self.reply_inbox:
-            item = self.reply_inbox.pop(token)
-            if isinstance(envelope.message, ErrorForward):
-                item.reply_fut.set_exception(envelope.message.error)
+        if token in self._waitings:
+            item = self._waitings.pop(token)
+            if envelope.type == msg.MsgType.ERROR:
+                item.reply_fut.set_exception(envelope.message)
+                logger.debug(f'Error resolved {repr(envelope.resp_token)}')
             else:
                 item.reply_fut.set_result(envelope.message)
+                logger.debug(f'Resolved {repr(envelope.resp_token)}')
             item.timer_handle.cancel()
             item.task.envelope = envelope
-
-    def msg_scope(self, envelope):
-        return MessageScope(self, envelope)
+        else:
+            logger.warning(f'Cannot found {repr(envelope.resp_token)} in waitings')
+            logger.debug(f'waitings: {list(self._waitings.keys())}')
 
     def run_main(self, coro):
-        return ContextAwareTask(coro, self)
+        self._main_task = asyncio.Task(coro, loop=self._loop)
 
-    def run_coroutine_behavior(self, behav):
-        if not iscoroutine(behav):
-            raise TypeError(
-                'argument of run_behavior() should be a coroutine; '
-                '{} found'.format(type(behav)))
+    def run_with_context(self, envelope, coro):
+        task = asyncio.Task(coro, loop=self._loop)
+        task.actor_ctx = self
+        task.envelope = envelope
+        return task
 
-        return ContextAwareTask(
-            self._wrap_exc(behav), self)
-
-    async def _wrap_exc(self, coro):
+    async def _wrap_exception(self, action, args, kwargs):
         try:
-            await coro
+            if asyncio.iscoroutinefunction(action):
+                await action(self._actor, *args, **kwargs)
+            else:
+                action(self._actor, *args, **kwargs)
         except Exception as e:
-            if self.envelope.req_token:
+            logger.exception("Error occurred while executing action")
+            if self.req_token:
                 self.sender.reply(e)
 
     def spawn(self, actor_type, *args, **kwargs):
-        child = spawn(actor_type, *args, parent=self.ref, **kwargs)
-        self.children.add(child)
+        child = cluster.spawn(actor_type, *args, parent=self.ref, **kwargs)
+        self._children.add(child)
         return child
 
     def remove_child(self, child):
-        self.children.remove(child)
+        self._children.remove(child)

@@ -1,31 +1,20 @@
-__all__ = (
-    'SystemMessage',
-    'ErrorForward',
+import collections
+import enum
+
+__all__ = [
+    'RpcMessage',
+    'MsgType',
     'Envelope'
-)
+]
+
+RpcMessage = collections.namedtuple('RpcMessage', [
+    'action_name',
+    'args',
+    'kwargs'
+])
 
 
-class SystemMessage(object):
-    __slots__ = ('command', 'args', 'kwargs')
-
-    def __init__(self, command, *args, **kwargs):
-        self.command = command
-        self.args = args
-        self.kwargs = kwargs
-
-    @staticmethod
-    def kill():
-        return SystemMessage('kill')
-
-
-class ErrorForward(object):
-    __slots__ = ('error', )
-
-    def __init__(self, error):
-        self.error = error
-
-
-class RPCMessage(object):
+class RpcMessage(object):
     __slots__ = ['action_name', 'args', 'kwargs']
 
     def __init__(self, action_name, args, kwargs):
@@ -33,19 +22,42 @@ class RPCMessage(object):
         self.args = args
         self.kwargs = kwargs
 
+    def __repr__(self):
+        params = (list(repr(arg) for arg in self.args) +
+                  list(f'{k}={repr(v)}' for k, v in self.kwargs.items()))
+        return f'{self.action_name}({", ".join(params)})'
+
+
+class MsgType(enum.Enum):
+    NORMAL = 0
+    INTERNAL = 1
+    RPC = 2
+    ERROR = 3
+
 
 class Envelope(object):
-    __slots__ = (
-        'message',    # Contents of the envelope
-        'rpc',        # RPC definition
-        'internal',   # For internal usage
-        'sender',     # Actor_ref who's sending this envelope
-        'req_token',  # Used in ask envelope (where to reply back)
-        'resp_token'  # Used in reply envelope (correspond to previous request_token)
-    )
+    __slots__ = ['type', 'message', 'sender', 'req_token', 'resp_token']
 
-    def __init__(self, message, sender, req_token=None, resp_token=None):
+    def __init__(self, type, message, sender, req_token=None, resp_token=None):
+        self.type = type
         self.message = message
         self.sender = sender
         self.req_token = req_token
         self.resp_token = resp_token
+
+    @staticmethod
+    def normal(msg, sender, req_token=None, resp_token=None):
+        return Envelope(MsgType.NORMAL, msg, sender,
+                        req_token=req_token, resp_token=resp_token)
+
+    @staticmethod
+    def internal(msg, sender):
+        return Envelope(MsgType.INTERNAL, msg, sender)
+
+    @staticmethod
+    def rpc(msg, sender, req_token=None):
+        return Envelope(MsgType.RPC, msg, sender, req_token=req_token)
+
+    @staticmethod
+    def error(msg, sender, resp_token):
+        return Envelope(MsgType.ERROR, msg, sender, resp_token=resp_token)
