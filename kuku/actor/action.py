@@ -1,6 +1,6 @@
 import collections
 
-from kuku.core.actor import exception as exc
+from kuku.actor import exception as exc
 
 __all__ = [
     'rpc',

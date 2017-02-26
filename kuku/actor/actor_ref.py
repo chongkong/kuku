@@ -1,11 +1,11 @@
 import asyncio
-import collections
 import functools
 import logging
 
+
 from kuku import util
-from kuku.core.actor import exception as exc
-from kuku.core.actor import message as msg
+from kuku.actor import exception as exc
+from kuku.actor import message as msg
 
 __all__ = [
     'ActorRef'

@@ -4,8 +4,8 @@ import functools
 import logging
 
 from kuku import util
-from kuku.core.actor import message as msg
-from kuku.core.actor import cluster
+from kuku.actor import cluster
+from kuku.actor import message as msg
 
 __all__ = [
     'ActorContext'
