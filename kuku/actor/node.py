@@ -65,28 +65,29 @@ class KukuNode(object):
         return random.choice(list(self._loops.values()))
 
 
-_reg = ActorRegistry()
-_node = KukuNode(_reg)
+_registry = ActorRegistry()
+_node = KukuNode(_registry)
 
 
 def get_actors(actor_type):
-    global _reg
+    global _registry
 
-    return _reg.get_actors(actor_type)
+    return _registry.get_actors(actor_type)
 
 
 def get_actor_by_uuid(uuid):
-    global _reg
+    global _registry
 
-    return _reg.get_actor_by_uuid(uuid)
+    return _registry.get_actor_by_uuid(uuid)
 
 
 def spawn(actor_type, *args, parent=None, **kwargs):
-    global _reg, _node
+    global _registry, _node
 
     if parent is None:
         parent = ref.ActorRef.nobody
-    actor = actor_type(_node.get_loop(), parent, args, kwargs)
+    actor = actor_type(_node.get_loop(), parent)
+    actor.start(args, kwargs)
     actor_ref = ref.LocalActorRef(actor.mailbox, type(actor), actor.uuid)
-    _reg.register_actor(actor_ref)
+    _registry.register_actor(actor_ref)
     return actor_ref

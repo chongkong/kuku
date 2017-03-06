@@ -61,3 +61,6 @@ class Envelope(object):
     @staticmethod
     def error(msg, sender, resp_token):
         return Envelope(MsgType.ERROR, msg, sender, resp_token=resp_token)
+
+    def __repr__(self):
+        return f'[{self.type.name}] {self.message}'

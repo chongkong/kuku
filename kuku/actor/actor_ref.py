@@ -96,4 +96,4 @@ class LocalActorRef(ActorRef):
             self.tell(message, sender=sender, msg_type=msg.MsgType.RPC)
 
     def __repr__(self):
-        return f'Local({self.actor_type.__name__})#{str(self.uuid)[:6]}'
+        return f'local/{self.actor_type.__name__}#{str(self.uuid)[:6]}'

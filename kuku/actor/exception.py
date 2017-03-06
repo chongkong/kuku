@@ -12,8 +12,9 @@ class Error(Exception):
     """Base Error class for all error in actor."""
     description: str = None
 
-    def __init__(self, description: str):
-        self.description = description
+    def __init__(self, description=None):
+        if description is not None:
+            self.description = description
 
     def __repr__(self):
         return '{}({})'.format(type(self), self.description)

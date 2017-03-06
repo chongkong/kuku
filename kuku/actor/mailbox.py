@@ -1,4 +1,4 @@
-from asyncio import Queue
+import asyncio
 
 __all__ = [
     'Mailbox',
@@ -10,7 +10,7 @@ class Mailbox(object):
 
     def __init__(self, loop):
         self._loop = loop
-        self._queue = Queue(loop=loop)
+        self._queue = asyncio.Queue(loop=loop)
 
     def put(self, item):
         self._loop.call_soon_threadsafe(self._queue.put_nowait, item)

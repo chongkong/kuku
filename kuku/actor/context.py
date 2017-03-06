@@ -26,7 +26,6 @@ class ActorContext(object):
         self._actor = actor
         self._ref = node.get_actor_by_uuid(actor.uuid)
         self._loop = loop
-        self._main_task = None
         self._waitings = {}
         self._children = set([])
 
@@ -109,11 +108,16 @@ class ActorContext(object):
             logger.warning(f'Cannot found {repr(envelope.resp_token)} in waitings')
             logger.debug(f'waitings: {list(self._waitings.keys())}')
 
-    def run_main(self, coro):
-        self._main_task = asyncio.Task(coro, loop=self._loop)
+    def run(self, coro):
+        async def waiter():
+            task = asyncio.ensure_future(coro, loop=self._loop)
+            task.actor_ctx = self
+            await task
+
+        return asyncio.run_coroutine_threadsafe(waiter(), loop=self._loop)
 
     def run_with_context(self, envelope, coro):
-        task = asyncio.Task(coro, loop=self._loop)
+        task = asyncio.ensure_future(coro, loop=self._loop)
         task.actor_ctx = self
         task.envelope = envelope
         return task

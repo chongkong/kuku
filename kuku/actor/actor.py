@@ -7,6 +7,7 @@ from kuku.actor import action as tree
 from kuku.actor import context as ctx
 from kuku.actor import exception as exc
 from kuku.actor import message as msg
+from kuku.actor import actor_ref as ref
 
 from kuku.actor import mailbox
 
@@ -15,8 +16,6 @@ __all__ = [
     'ActorMeta',
     'Actor'
 ]
-
-logger = logging.getLogger(__name__)
 
 
 class ActorState(enum.Enum):
@@ -47,6 +46,7 @@ class ActorMeta(type):
 
         actor_class.action_tree = tree.ActionTree(trigger_actions)
         actor_class.rpc_actions = rpc_actions
+        actor_class.logger = logging.getLogger(actor_class.__name__)
         return actor_class
 
 
@@ -54,17 +54,18 @@ class Actor(object, metaclass=ActorMeta):
     default_timeout = 60
     action_tree = None  # filled by ActorMeta
     rpc_actions = None  # filled by ActorMeta
+    logger = None  # filled by ActorMeta
 
-    def __init__(self, loop, parent, init_args, init_kwargs):
+    def __init__(self, loop, parent):
         self.parent = parent
         self.uuid = uuid.uuid4()
         self.life_state = ActorState.BORN
         self.mailbox = mailbox.Mailbox(loop)
         self.context = ctx.ActorContext(self, loop)
-        self.logger = logging.getLogger(f'{self}')
 
+    def start(self, init_args, init_kwargs):
         self.before_start(*init_args, **init_kwargs)
-        self.context.run_main(self._main())
+        self.context.run(self._main())
 
     def before_start(self, *args, **kwargs):
         pass
@@ -75,6 +76,10 @@ class Actor(object, metaclass=ActorMeta):
     @property
     def sender(self):
         return self.context.sender
+
+    @property
+    def ref(self):
+        return ref.LocalActorRef(self.mailbox, type(self), self.uuid)
 
     async def _main(self):
         while True:
@@ -121,12 +126,12 @@ class Actor(object, metaclass=ActorMeta):
             else:
                 raise exc.BadEnvelopeError(f'Invalid envelope type {envelope.type.name}')
         except Exception as e:
-            logger.exception("Error occurred while executing action")
+            self.logger.exception("Error occurred while executing action")
             if self.context.req_token:
                 self.sender.reply(e, msg_type=msg.MsgType.ERROR)
 
     def _handle_internal(self, message):
-        logger.debug(f'Received internal message {repr(message)}')
+        self.logger.debug(f'Received internal message {repr(message)}')
         if message == 'die':
             self.life_state = ActorState.STOPPED
 
