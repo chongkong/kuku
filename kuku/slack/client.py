@@ -10,6 +10,7 @@ from kuku import actor
 
 
 class SlackClientActor(actor.Actor):
+    msg_type_key = 'inbound_slack_msg_type'
     token = None
     session = None
     server = None
@@ -61,6 +62,7 @@ class SlackClientActor(actor.Actor):
                     if 'type' not in data:
                         continue
                     else:
+                        self._set_inbound_msg_type(data, 'rtm')
                         self.subscriber.tell(data)
 
     async def listen_interactive_message(self, request):
@@ -69,9 +71,11 @@ class SlackClientActor(actor.Actor):
             text = await request.text()
             body = dict(kv.split('=') for kv in quoting.unquote(text).split('&'))
             payload = json.loads(body['payload'])
+            self._set_inbound_msg_type(payload, 'interactive')
             resp = await self.subscriber.ask(payload, timeout=1)
             return web.Response(body=json.dumps(resp))
         except TimeoutError:
+            self.logger.debug('No answer for interactive message; skipping for ')
             return web.Response()
 
     async def listen_slash_command(self, request):
@@ -79,5 +83,9 @@ class SlackClientActor(actor.Actor):
         self.logger.debug('received slash command')
         text = await request.text()
         body = dict(kv.split('=') for kv in text.split('&'))
+        self._set_inbound_msg_type(body, 'slash_command')
         self.subscriber.tell(body)
         return web.Response()
+
+    def _set_inbound_msg_type(self, msg_dic, msg_type):
+        msg_dic[self.msg_type_key] = msg_type

@@ -39,3 +39,6 @@ class UnknownMessageTypeError(Error):
 class MultipleRootMappingsError(Error):
     pass
 
+
+class MessageResolveError(Error):
+    description = 'Failed to resolve action from given message'

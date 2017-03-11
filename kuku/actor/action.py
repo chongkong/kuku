@@ -21,7 +21,7 @@ def _field_set_decorator(**fields):
 
 def _field_add_decorator(field_name, value):
     def decorator(f):
-        if not hasattr(f, field_name):
+        if not hasattr(f, field_name) or getattr(f, field_name) is None:
             setattr(f, field_name, [])
         getattr(f, field_name).append(value)
         return f
@@ -49,7 +49,7 @@ def create_trigger_decorator(mapping_type):
     return decorator_decl
 
 
-def child_mapping(mapping_type, args):
+def child_mapping(mapping_type, *args):
     trigger = Trigger(mapping_type, args)
     return _field_add_decorator('parent_triggers', trigger)
 
@@ -105,14 +105,17 @@ class ActionTree(object):
                 self._register(parent_trigger, mapping)
         elif self.root is None:
             self.root = mapping
-        else:
-            raise exc.MultipleRootMappingsError
+        elif type(self.root) != type(mapping):
+            raise exc.MultipleRootMappingsError(
+                f'{type(self.root)}, {type(mapping)}')
 
     def resolve_action(self, message):
         mapping_or_action = self.root
         while isinstance(mapping_or_action, TriggerMapping):
             mapping_or_action = mapping_or_action.resolve(message)
-        return mapping_or_action
+        if mapping_or_action is not None:
+            return mapping_or_action
+        raise exc.MessageResolveError
 
     def __repr__(self):
         fields = ', '.join(f'{k}={v}' for k, v in self.__dict__.items())
